@@ -1,0 +1,284 @@
+package com.example.dbchecker;
+
+import com.google.common.math.Quantiles;
+import org.apache.commons.dbcp2.BasicDataSource;
+import picocli.CommandLine;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@CommandLine.Command(
+        name = "db-connection-checker",
+        mixinStandardHelpOptions = true,
+        description = "Benchmarks database connection acquisition and query execution times."
+)
+public class DbConnectionChecker implements Callable<Integer> {
+    private static final String CONNECTION_PROPERTIES_UNIT_PREFIX = "connectionProperties.";
+    private static final List<Integer> PERCENTILES_UNIT = List.of(50, 75, 90, 95, 99);
+
+    @CommandLine.Parameters(index = "0", paramLabel = "<propertiesFile>", description = "Path to the database properties file.")
+    private Path propertiesUnitPath;
+
+    @CommandLine.Parameters(index = "1", paramLabel = "<query>", description = "SQL query to execute for benchmarking.")
+    private String queryUnitSql;
+
+    @CommandLine.Parameters(index = "2", paramLabel = "<connections>", description = "Number of connections in the pool.")
+    private int connectionsUnitCount;
+
+    @CommandLine.Parameters(paramLabel = "<threads> <totalRequests>", arity = "1..2",
+            description = "Optional number of threads followed by total requests. If threads omitted, defaults to connections.")
+    private List<String> trailingUnitArgs = new ArrayList<>();
+
+    public static void main(String[] argsUnit) {
+        int exitUnitCode = new CommandLine(new DbConnectionChecker()).execute(argsUnit);
+        System.exit(exitUnitCode);
+    }
+
+    @Override
+    public Integer call() {
+        int threadsUnitCount;
+        int totalUnitRequests;
+
+        try {
+            if (trailingUnitArgs.size() == 1) {
+                threadsUnitCount = connectionsUnitCount;
+                totalUnitRequests = parsePositiveUnitInt(trailingUnitArgs.get(0), "total requests");
+            } else if (trailingUnitArgs.size() == 2) {
+                threadsUnitCount = parsePositiveUnitInt(trailingUnitArgs.get(0), "threads");
+                totalUnitRequests = parsePositiveUnitInt(trailingUnitArgs.get(1), "total requests");
+            } else {
+                throw new IllegalArgumentException("Expected total requests and optional threads parameters.");
+            }
+        } catch (IllegalArgumentException parameterUnitException) {
+            System.err.println(parameterUnitException.getMessage());
+            return CommandLine.ExitCode.USAGE;
+        }
+
+        if (threadsUnitCount > connectionsUnitCount) {
+            System.out.printf(
+                    "Warning: threads (%d) exceed pool size (%d). This may cause contention.%n",
+                    threadsUnitCount,
+                    connectionsUnitCount
+            );
+        }
+
+        Properties propertiesUnit;
+        try {
+            propertiesUnit = loadUnitProperties(propertiesUnitPath);
+        } catch (IOException ioUnitException) {
+            System.err.println("Failed to read properties file: " + ioUnitException.getMessage());
+            return CommandLine.ExitCode.SOFTWARE;
+        }
+
+        try (BasicDataSource dataSourceUnit = configureUnitDataSource(propertiesUnit, connectionsUnitCount)) {
+            runUnitBenchmark(dataSourceUnit, queryUnitSql, threadsUnitCount, totalUnitRequests);
+            return CommandLine.ExitCode.OK;
+        } catch (IllegalArgumentException configurationUnitException) {
+            System.err.println("Invalid datasource configuration: " + configurationUnitException.getMessage());
+            return CommandLine.ExitCode.USAGE;
+        } catch (SQLException sqlUnitException) {
+            System.err.println("Failed to configure or close the data source: " + sqlUnitException.getMessage());
+            sqlUnitException.printStackTrace(System.err);
+            return CommandLine.ExitCode.SOFTWARE;
+        }
+    }
+
+    private static void runUnitBenchmark(BasicDataSource dataSourceUnit, String queryUnitSql, int threadsUnitCount,
+                                         int totalUnitRequests) {
+        ExecutorService executorUnitService = Executors.newFixedThreadPool(threadsUnitCount);
+        long[] connectionUnitTimes = new long[totalUnitRequests];
+        long[] queryUnitTimes = new long[totalUnitRequests];
+        long[] totalUnitTimes = new long[totalUnitRequests];
+        AtomicInteger counterUnitIndex = new AtomicInteger();
+
+        try {
+            for (int requestUnitIndex = 0; requestUnitIndex < totalUnitRequests; requestUnitIndex++) {
+                executorUnitService.submit(() -> executeUnitQuery(
+                        dataSourceUnit,
+                        queryUnitSql,
+                        connectionUnitTimes,
+                        queryUnitTimes,
+                        totalUnitTimes,
+                        counterUnitIndex
+                ));
+            }
+        } finally {
+            executorUnitService.shutdown();
+        }
+
+        try {
+            if (!executorUnitService.awaitTermination(1, TimeUnit.HOURS)) {
+                System.err.println("Execution timed out.");
+                executorUnitService.shutdownNow();
+                Thread.currentThread().interrupt();
+                return;
+            }
+        } catch (InterruptedException interruptionUnitException) {
+            Thread.currentThread().interrupt();
+            System.err.println("Execution interrupted: " + interruptionUnitException.getMessage());
+            return;
+        }
+
+        printUnitStats("Connection acquisition", connectionUnitTimes);
+        printUnitStats("Query execution", queryUnitTimes);
+        printUnitStats("Total time", totalUnitTimes);
+    }
+
+    private static void executeUnitQuery(BasicDataSource dataSourceUnit, String queryUnitSql, long[] connectionUnitTimes,
+                                         long[] queryUnitTimes, long[] totalUnitTimes, AtomicInteger counterUnitIndex) {
+        int sampleUnitIndex = counterUnitIndex.getAndIncrement();
+        long connectionUnitStart = System.nanoTime();
+        long connectionUnitDuration;
+        long queryUnitDuration = 0L;
+        try (Connection connectionUnitHandle = dataSourceUnit.getConnection()) {
+            connectionUnitDuration = System.nanoTime() - connectionUnitStart;
+            long queryUnitStart = System.nanoTime();
+            try (Statement statementUnitHandle = connectionUnitHandle.createStatement()) {
+                boolean hasUnitResultSet = statementUnitHandle.execute(queryUnitSql);
+                if (hasUnitResultSet) {
+                    try (ResultSet resultUnitSet = statementUnitHandle.getResultSet()) {
+                        while (resultUnitSet.next()) {
+                            // Consume the result set to ensure the query fully executes.
+                        }
+                    }
+                }
+            }
+            queryUnitDuration = System.nanoTime() - queryUnitStart;
+        } catch (SQLException sqlUnitException) {
+            connectionUnitDuration = System.nanoTime() - connectionUnitStart;
+            System.err.printf("Request %d failed: %s%n", sampleUnitIndex, sqlUnitException.getMessage());
+            sqlUnitException.printStackTrace(System.err);
+        }
+
+        connectionUnitTimes[sampleUnitIndex] = connectionUnitDuration;
+        queryUnitTimes[sampleUnitIndex] = queryUnitDuration;
+        totalUnitTimes[sampleUnitIndex] = connectionUnitDuration + queryUnitDuration;
+    }
+
+    private static void printUnitStats(String titleUnitLabel, long[] sampleUnitValues) {
+        if (sampleUnitValues.length == 0) {
+            System.out.printf("%s: no samples collected.%n", titleUnitLabel);
+            return;
+        }
+
+        double[] millisUnitSamples = Arrays.stream(sampleUnitValues)
+                .mapToDouble(sampleUnitValue -> sampleUnitValue / 1_000_000.0)
+                .toArray();
+
+        double minUnitValue = Arrays.stream(millisUnitSamples).min().orElse(0.0);
+        double maxUnitValue = Arrays.stream(millisUnitSamples).max().orElse(0.0);
+        double avgUnitValue = Arrays.stream(millisUnitSamples).average().orElse(0.0);
+
+        Map<Integer, Double> percentileUnitValues = computeUnitPercentiles(millisUnitSamples);
+
+        System.out.println();
+        System.out.println(titleUnitLabel + ":");
+        System.out.printf("  min: %.3f ms%n", minUnitValue);
+        System.out.printf("  max: %.3f ms%n", maxUnitValue);
+        System.out.printf("  avg: %.3f ms%n", avgUnitValue);
+        for (Integer percentileUnitKey : PERCENTILES_UNIT) {
+            Double percentileUnitValue = percentileUnitValues.get(percentileUnitKey);
+            if (percentileUnitValue != null) {
+                System.out.printf("  p%d: %.3f ms%n", percentileUnitKey, percentileUnitValue);
+            }
+        }
+    }
+
+    private static Map<Integer, Double> computeUnitPercentiles(double[] sampleUnitValues) {
+        if (sampleUnitValues.length == 0) {
+            return Map.of();
+        }
+        Map<Integer, Double> percentileUnitMap = new LinkedHashMap<>();
+        int[] percentileUnitIndexes = PERCENTILES_UNIT.stream().mapToInt(Integer::intValue).toArray();
+        Map<Integer, Double> computedUnitPercentiles = Quantiles.percentiles().indexes(percentileUnitIndexes).compute(sampleUnitValues);
+        for (Integer percentileUnitKey : PERCENTILES_UNIT) {
+            Double percentileUnitValue = computedUnitPercentiles.get(percentileUnitKey);
+            if (percentileUnitValue != null) {
+                percentileUnitMap.put(percentileUnitKey, percentileUnitValue);
+            }
+        }
+        return percentileUnitMap;
+    }
+
+    private static BasicDataSource configureUnitDataSource(Properties propertiesUnit, int maxUnitConnections) throws SQLException {
+        BasicDataSource dataSourceUnit = new BasicDataSource();
+        dataSourceUnit.setDriverClassName(propertiesUnit.getProperty("driverClassName", "com.mysql.cj.jdbc.Driver"));
+        String urlUnitValue = propertiesUnit.getProperty("connectionUrl");
+        if (urlUnitValue == null || urlUnitValue.isBlank()) {
+            throw new IllegalArgumentException("Property 'connectionUrl' is required");
+        }
+        dataSourceUnit.setUrl(urlUnitValue);
+        dataSourceUnit.setMaxTotal(maxUnitConnections);
+        dataSourceUnit.setMaxIdle(maxUnitConnections);
+        dataSourceUnit.setInitialSize(Math.min(maxUnitConnections, 1));
+
+        if (propertiesUnit.containsKey("username")) {
+            dataSourceUnit.setUsername(propertiesUnit.getProperty("username"));
+        }
+        if (propertiesUnit.containsKey("password")) {
+            dataSourceUnit.setPassword(propertiesUnit.getProperty("password"));
+        }
+
+        for (String nameUnitKey : propertiesUnit.stringPropertyNames()) {
+            String valueUnitEntry = propertiesUnit.getProperty(nameUnitKey);
+            if (nameUnitKey.startsWith(CONNECTION_PROPERTIES_UNIT_PREFIX)) {
+                String propertyUnitName = nameUnitKey.substring(CONNECTION_PROPERTIES_UNIT_PREFIX.length());
+                dataSourceUnit.addConnectionProperty(propertyUnitName, valueUnitEntry);
+                if ("user".equals(propertyUnitName) || "username".equals(propertyUnitName)) {
+                    dataSourceUnit.setUsername(valueUnitEntry);
+                } else if ("password".equals(propertyUnitName)) {
+                    dataSourceUnit.setPassword(valueUnitEntry);
+                }
+            } else if ("testOnBorrow".equals(nameUnitKey)) {
+                dataSourceUnit.setTestOnBorrow(Boolean.parseBoolean(valueUnitEntry));
+            } else if ("validationQuery".equals(nameUnitKey)) {
+                dataSourceUnit.setValidationQuery(valueUnitEntry);
+            } else if ("maxWaitMillis".equals(nameUnitKey)) {
+                dataSourceUnit.setMaxWait(Duration.ofMillis(Long.parseLong(valueUnitEntry)));
+            }
+        }
+
+        return dataSourceUnit;
+    }
+
+    private static Properties loadUnitProperties(Path propertiesUnitPath) throws IOException {
+        Properties propertiesUnit = new Properties();
+        if (!Files.exists(propertiesUnitPath)) {
+            throw new IOException("Properties file does not exist: " + propertiesUnitPath);
+        }
+        try (InputStream inputUnitStream = Files.newInputStream(propertiesUnitPath)) {
+            propertiesUnit.load(inputUnitStream);
+        }
+        return propertiesUnit;
+    }
+
+    private static int parsePositiveUnitInt(String valueUnitText, String nameUnitLabel) {
+        try {
+            int parsedUnitValue = Integer.parseInt(valueUnitText);
+            if (parsedUnitValue <= 0) {
+                throw new IllegalArgumentException();
+            }
+            return parsedUnitValue;
+        } catch (IllegalArgumentException parsingUnitException) {
+            throw new IllegalArgumentException(String.format("Invalid %s value: %s", nameUnitLabel, valueUnitText), parsingUnitException);
+        }
+    }
+}
