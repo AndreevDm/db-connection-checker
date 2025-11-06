@@ -1,8 +1,11 @@
 package com.example.dbchecker;
 
 import com.google.common.math.Quantiles;
-import org.apache.commons.dbcp2.BasicDataSource;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import picocli.CommandLine;
+
+import javax.sql.DataSource;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -79,20 +82,22 @@ public class DbConnectionChecker implements Callable<Integer> {
             return CommandLine.ExitCode.SOFTWARE;
         }
 
-        try (BasicDataSource dataSourceUnit = configureUnitDataSource(propertiesUnit, connectionsUnitCount)) {
+        HikariDataSource dataSourceUnit = null;
+        try {
+            dataSourceUnit = configureUnitDataSource(propertiesUnit, connectionsUnitCount);
             runUnitBenchmark(dataSourceUnit, cliOptions.getQueryUnitSql(), threadsUnitCount, totalUnitRequests);
             return CommandLine.ExitCode.OK;
         } catch (IllegalArgumentException configurationUnitException) {
             System.err.println("Invalid datasource configuration: " + configurationUnitException.getMessage());
             return CommandLine.ExitCode.USAGE;
-        } catch (SQLException sqlUnitException) {
-            System.err.println("Failed to configure or close the data source: " + sqlUnitException.getMessage());
-            sqlUnitException.printStackTrace(System.err);
-            return CommandLine.ExitCode.SOFTWARE;
+        } finally {
+            if (dataSourceUnit != null) {
+                dataSourceUnit.close();
+            }
         }
     }
 
-    private static void runUnitBenchmark(BasicDataSource dataSourceUnit, String queryUnitSql, int threadsUnitCount,
+    private static void runUnitBenchmark(DataSource dataSourceUnit, String queryUnitSql, int threadsUnitCount,
                                          int totalUnitRequests) {
         ExecutorService executorUnitService = Executors.newFixedThreadPool(threadsUnitCount);
         long[] connectionUnitTimes = new long[totalUnitRequests];
@@ -143,7 +148,7 @@ public class DbConnectionChecker implements Callable<Integer> {
         printUnitStats("Total time", totalUnitTimes, successUnitFlags);
     }
 
-    private static void executeUnitQuery(BasicDataSource dataSourceUnit, String queryUnitSql, long[] connectionUnitTimes,
+    private static void executeUnitQuery(DataSource dataSourceUnit, String queryUnitSql, long[] connectionUnitTimes,
                                          long[] queryUnitTimes, long[] totalUnitTimes, boolean[] successUnitFlags,
                                          AtomicInteger counterUnitIndex) {
         int sampleUnitIndex = counterUnitIndex.getAndIncrement();
@@ -237,45 +242,52 @@ public class DbConnectionChecker implements Callable<Integer> {
         return percentileUnitMap;
     }
 
-    private static BasicDataSource configureUnitDataSource(Properties propertiesUnit, int maxUnitConnections) throws SQLException {
-        BasicDataSource dataSourceUnit = new BasicDataSource();
-        dataSourceUnit.setDriverClassName(propertiesUnit.getProperty("driverClassName", "com.mysql.cj.jdbc.Driver"));
+    private static HikariDataSource configureUnitDataSource(Properties propertiesUnit, int maxUnitConnections) {
+        HikariConfig config = new HikariConfig();
+        String driverClassName = propertiesUnit.getProperty("driverClassName");
+        if (driverClassName != null && !driverClassName.isBlank()) {
+            config.setDriverClassName(driverClassName);
+        }
         String urlUnitValue = propertiesUnit.getProperty("connectionUrl");
         if (urlUnitValue == null || urlUnitValue.isBlank()) {
             throw new IllegalArgumentException("Property 'connectionUrl' is required");
         }
-        dataSourceUnit.setUrl(urlUnitValue);
-        dataSourceUnit.setMaxTotal(maxUnitConnections);
-        dataSourceUnit.setMaxIdle(maxUnitConnections);
-        dataSourceUnit.setInitialSize(Math.min(maxUnitConnections, 1));
+        config.setJdbcUrl(urlUnitValue);
 
-        if (propertiesUnit.containsKey("username")) {
-            dataSourceUnit.setUsername(propertiesUnit.getProperty("username"));
-        }
-        if (propertiesUnit.containsKey("password")) {
-            dataSourceUnit.setPassword(propertiesUnit.getProperty("password"));
-        }
+        // Pool sizing
+        config.setMaximumPoolSize(maxUnitConnections);
+        config.setMinimumIdle(Math.min(1, maxUnitConnections));
 
+        // Credentials
+        String user = propertiesUnit.getProperty("username");
+        if (user != null) config.setUsername(user);
+        String pass = propertiesUnit.getProperty("password");
+        if (pass != null) config.setPassword(pass);
+
+        // Map extra properties
         for (String nameUnitKey : propertiesUnit.stringPropertyNames()) {
             String valueUnitEntry = propertiesUnit.getProperty(nameUnitKey);
             if (nameUnitKey.startsWith(CONNECTION_PROPERTIES_UNIT_PREFIX)) {
                 String propertyUnitName = nameUnitKey.substring(CONNECTION_PROPERTIES_UNIT_PREFIX.length());
-                dataSourceUnit.addConnectionProperty(propertyUnitName, valueUnitEntry);
+                config.addDataSourceProperty(propertyUnitName, valueUnitEntry);
                 if ("user".equals(propertyUnitName) || "username".equals(propertyUnitName)) {
-                    dataSourceUnit.setUsername(valueUnitEntry);
+                    config.setUsername(valueUnitEntry);
                 } else if ("password".equals(propertyUnitName)) {
-                    dataSourceUnit.setPassword(valueUnitEntry);
+                    config.setPassword(valueUnitEntry);
                 }
-            } else if ("testOnBorrow".equals(nameUnitKey)) {
-                dataSourceUnit.setTestOnBorrow(Boolean.parseBoolean(valueUnitEntry));
             } else if ("validationQuery".equals(nameUnitKey)) {
-                dataSourceUnit.setValidationQuery(valueUnitEntry);
+                config.setConnectionTestQuery(valueUnitEntry);
             } else if ("maxWaitMillis".equals(nameUnitKey)) {
-                dataSourceUnit.setMaxWaitMillis(Long.parseLong(valueUnitEntry));
+                try {
+                    long timeout = Long.parseLong(valueUnitEntry);
+                    if (timeout >= 0) config.setConnectionTimeout(Math.min(timeout, Integer.MAX_VALUE));
+                } catch (NumberFormatException ignore) {
+                    // ignore
+                }
             }
         }
 
-        return dataSourceUnit;
+        return new HikariDataSource(config);
     }
 
     private static Properties loadUnitProperties(Path propertiesUnitPath) throws IOException {
