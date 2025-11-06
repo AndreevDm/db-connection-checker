@@ -34,18 +34,8 @@ public class DbConnectionChecker implements Callable<Integer> {
     private static final String CONNECTION_PROPERTIES_UNIT_PREFIX = "connectionProperties.";
     private static final List<Integer> PERCENTILES_UNIT = List.of(50, 75, 90, 95, 99);
 
-    @CommandLine.Parameters(index = "0", paramLabel = "<propertiesFile>", description = "Path to the database properties file.")
-    private Path propertiesUnitPath;
-
-    @CommandLine.Parameters(index = "1", paramLabel = "<query>", description = "SQL query to execute for benchmarking.")
-    private String queryUnitSql;
-
-    @CommandLine.Parameters(index = "2", paramLabel = "<connections>", description = "Number of connections in the pool.")
-    private int connectionsUnitCount;
-
-    @CommandLine.Parameters(paramLabel = "<threads> <totalRequests>", arity = "1..2",
-            description = "Optional number of threads followed by total requests. If threads omitted, defaults to connections.")
-    private List<String> trailingUnitArgs = new ArrayList<>();
+    @CommandLine.Mixin
+    private CliOptions cliOptions = new CliOptions();
 
     public static void main(String[] argsUnit) {
         int exitUnitCode = new CommandLine(new DbConnectionChecker()).execute(argsUnit);
@@ -55,17 +45,18 @@ public class DbConnectionChecker implements Callable<Integer> {
     @Override
     public Integer call() {
         int threadsUnitCount;
+        int connectionsUnitCount;
         int totalUnitRequests;
 
         try {
-            if (trailingUnitArgs.size() == 1) {
+            // Validate required options (ensure > 0)
+            connectionsUnitCount = parsePositiveUnitInt(Integer.toString(cliOptions.getConnectionsUnitCount()), "connections");
+            totalUnitRequests = parsePositiveUnitInt(Integer.toString(cliOptions.getTotalUnitRequests()), "total requests");
+            Integer threadsUnitCountOption = cliOptions.getThreadsUnitCountOption();
+            if (threadsUnitCountOption == null) {
                 threadsUnitCount = connectionsUnitCount;
-                totalUnitRequests = parsePositiveUnitInt(trailingUnitArgs.get(0), "total requests");
-            } else if (trailingUnitArgs.size() == 2) {
-                threadsUnitCount = parsePositiveUnitInt(trailingUnitArgs.get(0), "threads");
-                totalUnitRequests = parsePositiveUnitInt(trailingUnitArgs.get(1), "total requests");
             } else {
-                throw new IllegalArgumentException("Expected total requests and optional threads parameters.");
+                threadsUnitCount = parsePositiveUnitInt(Integer.toString(threadsUnitCountOption), "threads");
             }
         } catch (IllegalArgumentException parameterUnitException) {
             System.err.println(parameterUnitException.getMessage());
@@ -82,14 +73,14 @@ public class DbConnectionChecker implements Callable<Integer> {
 
         Properties propertiesUnit;
         try {
-            propertiesUnit = loadUnitProperties(propertiesUnitPath);
+            propertiesUnit = loadUnitProperties(cliOptions.getPropertiesUnitPath());
         } catch (IOException ioUnitException) {
             System.err.println("Failed to read properties file: " + ioUnitException.getMessage());
             return CommandLine.ExitCode.SOFTWARE;
         }
 
         try (BasicDataSource dataSourceUnit = configureUnitDataSource(propertiesUnit, connectionsUnitCount)) {
-            runUnitBenchmark(dataSourceUnit, queryUnitSql, threadsUnitCount, totalUnitRequests);
+            runUnitBenchmark(dataSourceUnit, cliOptions.getQueryUnitSql(), threadsUnitCount, totalUnitRequests);
             return CommandLine.ExitCode.OK;
         } catch (IllegalArgumentException configurationUnitException) {
             System.err.println("Invalid datasource configuration: " + configurationUnitException.getMessage());
@@ -107,6 +98,7 @@ public class DbConnectionChecker implements Callable<Integer> {
         long[] connectionUnitTimes = new long[totalUnitRequests];
         long[] queryUnitTimes = new long[totalUnitRequests];
         long[] totalUnitTimes = new long[totalUnitRequests];
+        boolean[] successUnitFlags = new boolean[totalUnitRequests];
         AtomicInteger counterUnitIndex = new AtomicInteger();
 
         try {
@@ -117,6 +109,7 @@ public class DbConnectionChecker implements Callable<Integer> {
                         connectionUnitTimes,
                         queryUnitTimes,
                         totalUnitTimes,
+                        successUnitFlags,
                         counterUnitIndex
                 ));
             }
@@ -137,17 +130,27 @@ public class DbConnectionChecker implements Callable<Integer> {
             return;
         }
 
-        printUnitStats("Connection acquisition", connectionUnitTimes);
-        printUnitStats("Query execution", queryUnitTimes);
-        printUnitStats("Total time", totalUnitTimes);
+        int successUnitCount = 0;
+        for (boolean successUnitFlag : successUnitFlags) {
+            if (successUnitFlag) successUnitCount++;
+        }
+        double successUnitPercent = (totalUnitRequests == 0) ? 0.0 : (successUnitCount * 100.0 / totalUnitRequests);
+        System.out.println();
+        System.out.printf("Successful requests: %d/%d (%.2f%%)%n", successUnitCount, totalUnitRequests, successUnitPercent);
+
+        printUnitStats("Connection acquisition", connectionUnitTimes, successUnitFlags);
+        printUnitStats("Query execution", queryUnitTimes, successUnitFlags);
+        printUnitStats("Total time", totalUnitTimes, successUnitFlags);
     }
 
     private static void executeUnitQuery(BasicDataSource dataSourceUnit, String queryUnitSql, long[] connectionUnitTimes,
-                                         long[] queryUnitTimes, long[] totalUnitTimes, AtomicInteger counterUnitIndex) {
+                                         long[] queryUnitTimes, long[] totalUnitTimes, boolean[] successUnitFlags,
+                                         AtomicInteger counterUnitIndex) {
         int sampleUnitIndex = counterUnitIndex.getAndIncrement();
         long connectionUnitStart = System.nanoTime();
         long connectionUnitDuration;
         long queryUnitDuration = 0L;
+        boolean successUnit = false;
         try (Connection connectionUnitHandle = dataSourceUnit.getConnection()) {
             connectionUnitDuration = System.nanoTime() - connectionUnitStart;
             long queryUnitStart = System.nanoTime();
@@ -162,6 +165,7 @@ public class DbConnectionChecker implements Callable<Integer> {
                 }
             }
             queryUnitDuration = System.nanoTime() - queryUnitStart;
+            successUnit = true;
         } catch (SQLException sqlUnitException) {
             connectionUnitDuration = System.nanoTime() - connectionUnitStart;
             System.err.printf("Request %d failed: %s%n", sampleUnitIndex, sqlUnitException.getMessage());
@@ -171,17 +175,32 @@ public class DbConnectionChecker implements Callable<Integer> {
         connectionUnitTimes[sampleUnitIndex] = connectionUnitDuration;
         queryUnitTimes[sampleUnitIndex] = queryUnitDuration;
         totalUnitTimes[sampleUnitIndex] = connectionUnitDuration + queryUnitDuration;
+        successUnitFlags[sampleUnitIndex] = successUnit;
     }
 
-    private static void printUnitStats(String titleUnitLabel, long[] sampleUnitValues) {
+    private static void printUnitStats(String titleUnitLabel, long[] sampleUnitValues, boolean[] successUnitFlags) {
         if (sampleUnitValues.length == 0) {
             System.out.printf("%s: no samples collected.%n", titleUnitLabel);
             return;
         }
 
-        double[] millisUnitSamples = Arrays.stream(sampleUnitValues)
-                .mapToDouble(sampleUnitValue -> sampleUnitValue / 1_000_000.0)
-                .toArray();
+        // Filter by successful samples only
+        int successUnitCount = 0;
+        for (boolean success : successUnitFlags) {
+            if (success) successUnitCount++;
+        }
+        if (successUnitCount == 0) {
+            System.out.printf("%s: no successful samples to report.%n", titleUnitLabel);
+            return;
+        }
+
+        double[] millisUnitSamples = new double[successUnitCount];
+        int posUnit = 0;
+        for (int i = 0; i < sampleUnitValues.length && i < successUnitFlags.length; i++) {
+            if (successUnitFlags[i]) {
+                millisUnitSamples[posUnit++] = sampleUnitValues[i] / 1_000_000.0;
+            }
+        }
 
         double minUnitValue = Arrays.stream(millisUnitSamples).min().orElse(0.0);
         double maxUnitValue = Arrays.stream(millisUnitSamples).max().orElse(0.0);
@@ -252,7 +271,7 @@ public class DbConnectionChecker implements Callable<Integer> {
             } else if ("validationQuery".equals(nameUnitKey)) {
                 dataSourceUnit.setValidationQuery(valueUnitEntry);
             } else if ("maxWaitMillis".equals(nameUnitKey)) {
-                dataSourceUnit.setMaxWait(Duration.ofMillis(Long.parseLong(valueUnitEntry)));
+                dataSourceUnit.setMaxWaitMillis(Long.parseLong(valueUnitEntry));
             }
         }
 
