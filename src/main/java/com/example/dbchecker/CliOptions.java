@@ -26,8 +26,8 @@ public class CliOptions {
             description = "Optional number of threads. If omitted, defaults to the number of connections.")
     private Integer threadsCountOption;
 
-    @CommandLine.Option(names = {"-n", "--total-requests"}, required = true, paramLabel = "<totalRequests>",
-            description = "Total number of requests to execute across all threads.")
+    @CommandLine.Option(names = {"-n", "--requests-per-thread", "--total-requests"}, required = true, paramLabel = "<requestsPerThread>",
+            description = "Number of requests per thread.")
     private int totalRequests;
 
     @CommandLine.Option(names = {"--pool"}, defaultValue = "HIKARI",

@@ -53,13 +53,14 @@ public class DbConnectionChecker implements Callable<Integer> {
         try {
             // Validate required options (ensure > 0)
             connectionsCount = parsePositiveInt(Integer.toString(cliOptions.getConnectionsCount()), "connections");
-            totalRequests = parsePositiveInt(Integer.toString(cliOptions.getTotalRequests()), "total requests");
+            int requestsPerThread = parsePositiveInt(Integer.toString(cliOptions.getTotalRequests()), "requests per thread");
             Integer threadsCountOption = cliOptions.getThreadsCountOption();
             if (threadsCountOption == null) {
                 threadsCount = connectionsCount;
             } else {
                 threadsCount = parsePositiveInt(Integer.toString(threadsCountOption), "threads");
             }
+            totalRequests = threadsCount * requestsPerThread;
         } catch (IllegalArgumentException parameterException) {
             System.err.println(parameterException.getMessage());
             return CommandLine.ExitCode.USAGE;
@@ -108,6 +109,9 @@ public class DbConnectionChecker implements Callable<Integer> {
         long[] totalTimesNs = new long[totalRequests];
         boolean[] successFlags = new boolean[totalRequests];
         AtomicInteger counterIndex = new AtomicInteger();
+        // Progress tracking: report every 10%
+        AtomicInteger completedCount = new AtomicInteger();
+        AtomicInteger nextProgressPercent = new AtomicInteger(10);
 
         try {
             for (int requestIndex = 0; requestIndex < totalRequests; requestIndex++) {
@@ -118,7 +122,10 @@ public class DbConnectionChecker implements Callable<Integer> {
                         queryTimesNs,
                         totalTimesNs,
                         successFlags,
-                        counterIndex
+                        counterIndex,
+                        completedCount,
+                        totalRequests,
+                        nextProgressPercent
                 ));
             }
         } finally {
@@ -153,7 +160,10 @@ public class DbConnectionChecker implements Callable<Integer> {
 
     private static void executeQuery(DataSource dataSource, String querySql, long[] connectionTimesNs,
                                      long[] queryTimesNs, long[] totalTimesNs, boolean[] successFlags,
-                                     AtomicInteger counterIndex) {
+                                     AtomicInteger counterIndex,
+                                     AtomicInteger completedCount,
+                                     int totalRequests,
+                                     AtomicInteger nextProgressPercent) {
         int sampleIndex = counterIndex.getAndIncrement();
         long connectionStartNs = System.nanoTime();
         long connectionDurationNs;
@@ -184,6 +194,23 @@ public class DbConnectionChecker implements Callable<Integer> {
         queryTimesNs[sampleIndex] = queryDurationNs;
         totalTimesNs[sampleIndex] = connectionDurationNs + queryDurationNs;
         successFlags[sampleIndex] = success;
+
+        // Progress update
+        int done = completedCount.incrementAndGet();
+        if (totalRequests > 0) {
+            int percent = (int) Math.floor(done * 100.0 / totalRequests);
+            while (true) {
+                int target = nextProgressPercent.get();
+                if (percent >= target && target <= 100) {
+                    if (nextProgressPercent.compareAndSet(target, target + 10)) {
+                        System.out.printf("Progress: %d%%%n", target);
+                        continue;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     private static void printStats(String title, long[] sampleTimesNs, boolean[] successFlags) {
